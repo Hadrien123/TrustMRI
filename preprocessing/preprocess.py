@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Preprocess BraTS-Africa for modality imputation + segmentation.
 
-BraTS-Africa (BraTS 2023 format: <case_id>-{t1n,t1c,t2w,t2f,seg}.nii.gz) is already
+BraTS-Africa (BraTS 2023 format: <case_id>-{t1n,t1c,t2w,t2f,seg}.nii or .nii.gz) is already
 co-registered to SRI24, resampled to 1 mm (240x240x155) and skull-stripped, so we do
 NOT register or skull-strip again (it would only add interpolation blur).
 
@@ -41,6 +41,11 @@ MODALITIES = ["t1n", "t1c", "t2w", "t2f"]
 CROP_SHAPE = (192, 192, 160)  # (x, y, z) in nibabel order
 
 
+def find_nifti(case_dir, case_id, suffix):
+    """Path to <case_id>-<suffix>.nii or .nii.gz, or None if neither exists."""
+    return next((p for ext in (".nii", ".nii.gz") if (p := case_dir / f"{case_id}-{suffix}{ext}").exists()), None)
+
+
 def normalize(vol, mask):
     lo, hi = np.percentile(vol[mask], [0.5, 99.5])
     return (np.clip((vol - lo) / max(hi - lo, 1e-8), 0, 1) * mask).astype(np.float32)
@@ -75,10 +80,12 @@ def process_case(job):
     case_dir = root / row["class"] / case_id
     log = {"case_id": case_id, "status": "ok", "axcodes": "", "has_seg": False, "brain_voxels_cropped_out": ""}
     try:
-        seg_path = case_dir / f"{case_id}-seg.nii.gz"
-        log["has_seg"] = seg_path.exists()
-        imgs = [nib.load(case_dir / f"{case_id}-{m}.nii.gz") for m in MODALITIES]
-        imgs += [nib.load(seg_path)] if log["has_seg"] else []
+        paths = [find_nifti(case_dir, case_id, m) for m in MODALITIES]
+        if None in paths:
+            raise FileNotFoundError(f"missing {[m for m, p in zip(MODALITIES, paths) if p is None]}")
+        seg_path = find_nifti(case_dir, case_id, "seg")
+        log["has_seg"] = seg_path is not None
+        imgs = [nib.load(p) for p in paths + ([seg_path] if seg_path else [])]
 
         ref = imgs[0]
         if any(i.shape != ref.shape or not np.allclose(i.affine, ref.affine, atol=1e-3) for i in imgs[1:]):
