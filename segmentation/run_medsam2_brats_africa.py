@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run MedSAM2 (3D, box-prompted) on preprocessed BraTS-Africa cases.
 
-Input: the .npz files from preprocessing/preprocess.py (192x192x160, [0, 1], brain-masked).
-Each of the 160 axial 192x192 slices is resized to 512x512 for the model (MedSAM2's
-sam2.1_hiera_t512 config); masks come back at 192x192, aligned with the preprocessed volumes.
+Input: the NIfTI files from preprocessing/preprocess.py (240x240x155, [0, 1], brain-masked).
+Each of the 155 axial 240x240 slices is resized to 512x512 for the model (MedSAM2's
+sam2.1_hiera_t512 config); masks come back at 240x240, aligned with the original scans.
 
 MedSAM2 needs a box prompt on one key slice and propagates it through the volume.
 The box is taken from the ground-truth mask on the slice with the largest tumor area
@@ -26,7 +26,7 @@ from sam2.build_sam import build_sam2_video_predictor_npz
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_DATA = Path.home() / "software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa_preprocessed"
 DEFAULT_CKPT = Path.home() / "software/MedSAM2/checkpoints/MedSAM2_latest.pt"
-MODALITIES = ["t1n", "t1c", "t2w", "t2f"]  # channel order in the .npz
+MODALITIES = ["t1n", "t1c", "t2w", "t2f"]
 
 # BraTS labels: 1 = necrotic core, 2 = edema, 3 = enhancing tumor
 TARGETS = {
@@ -81,7 +81,7 @@ def dice(a, b):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", type=Path, default=DEFAULT_DATA, help="preprocessed .npz folder")
+    ap.add_argument("--data", type=Path, default=DEFAULT_DATA, help="preprocessed NIfTI folder")
     ap.add_argument("--split-csv", type=Path, default=REPO / "data/splits/brats_africa_split.csv")
     ap.add_argument("--split", choices=["train", "test", "all"], default="test")
     ap.add_argument("--target", choices=TARGETS, default="wt")
@@ -104,16 +104,21 @@ def main():
 
     results = []
     for i, row in enumerate(cases, 1):
-        case = np.load(args.data / f"{row['case_id']}.npz")
+        case_dir = args.data / row["class"] / row["case_id"]
+        seg_path = case_dir / f"{row['case_id']}-seg.nii.gz"
+        if not seg_path.exists():
+            print(f"[{i}/{len(cases)}] {row['case_id']}: no seg file (needed for the box prompt), skipped")
+            continue
+        img = nib.load(case_dir / f"{row['case_id']}-{modality}.nii.gz")
         # (x, y, z) -> (z, x, y): one axial slice per "video frame"
-        vol = np.moveaxis(case["image"][MODALITIES.index(modality)], 2, 0)
-        gt = np.moveaxis(np.isin(case["seg"], labels), 2, 0)
+        vol = np.moveaxis(img.get_fdata(dtype=np.float32), 2, 0)
+        gt = np.moveaxis(np.isin(np.asarray(nib.load(seg_path).dataobj), labels), 2, 0)
         if not gt.any():
             print(f"[{i}/{len(cases)}] {row['case_id']}: no '{args.target}' voxels in GT, skipped")
             continue
 
         seg = segment(predictor, vol, *box_prompt(gt))
-        nib.save(nib.Nifti1Image(np.moveaxis(seg, 0, 2), case["affine"]), out / f"{row['case_id']}.nii.gz")
+        nib.save(nib.Nifti1Image(np.moveaxis(seg, 0, 2), img.affine), out / f"{row['case_id']}.nii.gz")
 
         d = dice(seg.astype(bool), gt)
         results.append({"case_id": row["case_id"], "class": row["class"], "split": row["split"], "dice": round(d, 4)})

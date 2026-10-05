@@ -10,18 +10,11 @@ Per case:
   2. Brain mask: union of nonzero voxels across the 4 modalities (saved, for PSNR/SSIM).
   3. Normalization per modality, brain voxels only: clip to the 0.5-99.5 percentiles,
      rescale to [0, 1]. For a tanh generator use x * 2 - 1 at load time.
-  4. Crop/pad to 192x192x160 (x, y, z): x/y cropped from 240 around the brain's bounding
-     box (only background is removed), z zero-padded from 155 so no slice is lost.
-     Every axis is divisible by 32, so it fits U-Nets with up to 5 downsamplings.
-     Models that need another size (e.g. MedSAM2's 512x512 slices) resize at inference.
-  5. Cache one compressed .npz per case:
-       image (4, 192, 192, 160) float32 in MODALITIES order, mask and seg (192, 192, 160),
-       affine (of the cropped volume, so outputs can be saved as NIfTI directly),
-       crop_offsets (to map back to the original 240x240x155 grid).
 
-Splits are subject level, from data/splits/brats_africa_split.csv.
-At training time: modality dropout; spatial augmentation on inputs and target alike;
-intensity augmentation on inputs only.
+Output mirrors the input layout, same grid and affine as the originals:
+    <out>/<class>/<case_id>/<case_id>-{t1n,t1c,t2w,t2f}.nii.gz   float32 in [0, 1]
+    <out>/<class>/<case_id>/<case_id>-mask.nii.gz                uint8
+    <out>/<class>/<case_id>/<case_id>-seg.nii.gz                 uint8 (if present)
 
 Usage:
     python preprocessing/preprocess.py --limit 3     # quick check, then:
@@ -38,7 +31,6 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 DATA_DIR = Path.home() / "software/BraTs Africa/BraTS-Africa Dataset"
 MODALITIES = ["t1n", "t1c", "t2w", "t2f"]
-CROP_SHAPE = (192, 192, 160)  # (x, y, z) in nibabel order
 
 
 def find_nifti(case_dir, case_id, suffix):
@@ -51,34 +43,11 @@ def normalize(vol, mask):
     return (np.clip((vol - lo) / max(hi - lo, 1e-8), 0, 1) * mask).astype(np.float32)
 
 
-def brain_offsets(mask):
-    """Per axis: center the crop on the brain bounding box (clamped to the volume), or center-pad."""
-    offsets = []
-    for axis, (s, t) in enumerate(zip(mask.shape, CROP_SHAPE)):
-        if s <= t:
-            offsets.append((s - t) // 2)
-            continue
-        idx = np.nonzero(mask.any(axis=tuple(a for a in range(3) if a != axis)))[0]
-        center = (idx[0] + idx[-1]) // 2
-        offsets.append(int(np.clip(center - t // 2, 0, s - t)))
-    return np.array(offsets)
-
-
-def crop_or_pad(arr, offsets):
-    """Fit the last 3 dims to CROP_SHAPE; offset > 0 crops, < 0 zero-pads."""
-    out = np.zeros(arr.shape[:-3] + CROP_SHAPE, arr.dtype)
-    sizes = [min(s, t) for s, t in zip(arr.shape[-3:], CROP_SHAPE)]
-    src = tuple(slice(max(o, 0), max(o, 0) + n) for o, n in zip(offsets, sizes))
-    dst = tuple(slice(max(-o, 0), max(-o, 0) + n) for o, n in zip(offsets, sizes))
-    out[(...,) + dst] = arr[(...,) + src]
-    return out
-
-
 def process_case(job):
-    row, root, out_dir = job
+    row, root, out_root = job
     case_id = row["case_id"]
     case_dir = root / row["class"] / case_id
-    log = {"case_id": case_id, "status": "ok", "axcodes": "", "has_seg": False, "brain_voxels_cropped_out": ""}
+    log = {"case_id": case_id, "status": "ok", "axcodes": "", "has_seg": False}
     try:
         paths = [find_nifti(case_dir, case_id, m) for m in MODALITIES]
         if None in paths:
@@ -87,29 +56,24 @@ def process_case(job):
         log["has_seg"] = seg_path is not None
         imgs = [nib.load(p) for p in paths + ([seg_path] if seg_path else [])]
 
+        # 1. sanity check
         ref = imgs[0]
         if any(i.shape != ref.shape or not np.allclose(i.affine, ref.affine, atol=1e-3) for i in imgs[1:]):
             raise ValueError("shape/affine mismatch between files")
         log["axcodes"] = "".join(nib.aff2axcodes(ref.affine))
 
-        vols = np.stack([i.get_fdata(dtype=np.float32) for i in imgs[:4]])
-        seg = np.asarray(imgs[4].dataobj, np.uint8) if log["has_seg"] else np.zeros(ref.shape, np.uint8)
-        mask = (vols != 0).any(axis=0)
-        image = np.stack([normalize(v, mask) for v in vols])
+        # 2. brain mask, 3. normalization
+        vols = [i.get_fdata(dtype=np.float32) for i in imgs[:4]]
+        mask = np.any([v != 0 for v in vols], axis=0)
 
-        offsets = brain_offsets(mask)
-        mask_c = crop_or_pad(mask, offsets)
-        affine = ref.affine.copy()
-        affine[:3, 3] += affine[:3, :3] @ offsets
-        np.savez_compressed(
-            out_dir / f"{case_id}.npz",
-            image=crop_or_pad(image, offsets),
-            mask=mask_c,
-            seg=crop_or_pad(seg, offsets),
-            affine=affine,
-            crop_offsets=offsets,
-        )
-        log["brain_voxels_cropped_out"] = int(mask.sum() - mask_c.sum())
+        out_dir = out_root / row["class"] / case_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save = lambda arr, suffix: nib.save(nib.Nifti1Image(arr, ref.affine), out_dir / f"{case_id}-{suffix}.nii.gz")
+        for m, v in zip(MODALITIES, vols):
+            save(normalize(v, mask), m)
+        save(mask.astype(np.uint8), "mask")
+        if seg_path:
+            save(np.asarray(imgs[4].dataobj, np.uint8), "seg")
     except Exception as e:  # log and keep going
         log["status"] = f"error: {e}"
     return log
@@ -144,8 +108,6 @@ def main():
     print(f"\n{len(ok)}/{len(results)} cases ok -> {args.out}")
     if len({r["axcodes"] for r in ok}) > 1:
         print("WARNING: inconsistent orientations:", sorted({r["axcodes"] for r in ok}))
-    if any(r["brain_voxels_cropped_out"] for r in ok):
-        print("WARNING: crop removed brain voxels in some cases (see preprocess_log.csv)")
 
 
 if __name__ == "__main__":
