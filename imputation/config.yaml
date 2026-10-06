@@ -3,8 +3,10 @@
 # BraTS-style split: <data_dir>/<class folder>/<subject>/<subject>-{t1c,t1n,t2f,t2w}.nii[.gz]
 data_dir: "/home/dell/software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa_split/test"
 
-# Imputed images are written to <output_dir>/<class folder>/<subject>/<subject>-<modality><output_ext>
-output_dir: "../results/W_preprocess_imputed"
+# Per subject and modality:  <output_dir>/<class folder>/<subject>/<modality>/
+#   original/<subject>-<modality>.nii[.gz]          symlink to the real image
+#   imputed/<subject>-<modality>-runNN<output_ext>  one per run
+output_dir: "../results/W_preprocess_imputed_multiple_runs"  # output folder for imputed images
 output_ext: ".nii"            # ".nii" matches the original dataset; ".nii.gz" to compress
 
 model:
@@ -13,5 +15,8 @@ model:
   parameters_file: "/home/dell/software/BraSyn_tutorial/mlcube/workspace/parameters.yaml"
 
 modalities: [t1c, t1n, t2f, t2w]   # each is dropped once and imputed from the other three
-limit: null                       # set to N to only process the first N subjects (quick test)
+n_runs: 10                        # imputations per subject and modality (--n-runs overrides)
+noise: 0.1                       # input noise std as a fraction of each input's brain std; 0 = off (--noise)
+dropout: 0                     # MC dropout probability inside SIT; 0 = off (--dropout). Imputations degrade fast: corr with clean output ~0.95 at 0.02, ~0.74 at 0.1
+limit: 5                       # set to N to only process the first N subjects (quick test)
 work_dir: "../results/_work"       # temporary staging; deleted when the run finishes

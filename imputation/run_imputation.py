@@ -1,11 +1,16 @@
 """Leave-one-modality-out imputation of a BraTS split with the pretrained BraSyn model.
 
 For each modality in the config, that modality is withheld for every subject, the other three
-are fed to BraSyn, and the synthesised image is written (in the original image grid) to
-    <output_dir>/<class folder>/<subject>/<subject>-<modality><output_ext>
-so after all passes every subject folder holds its imputed modalities, mirroring the dataset.
+are fed to BraSyn, and the synthesised image is written (in the original image grid) n_runs times:
+    <output_dir>/<class folder>/<subject>/<modality>/original/<subject>-<modality>.nii[.gz]   (symlink)
+    <output_dir>/<class folder>/<subject>/<modality>/imputed/<subject>-<modality>-runNN<output_ext>
+BraSyn is deterministic, so runs differ only through the perturbations below (run k uses seed k):
+  noise   -- Gaussian noise of noise x (each input's brain-voxel std) added to the inputs' brain voxels
+  dropout -- element-wise dropout with probability p after SIT's internal ReLUs, kept on at inference
+             (MC dropout; the model was trained without dropout)
+Set both to 0 for a plain, unperturbed imputation.
 
-Usage:  python run_imputation.py [--config config.yaml]
+Usage:  python run_imputation.py [--config config.yaml] [--n-runs 10] [--noise 0.05] [--dropout 0.02]
 """
 import argparse
 import os
@@ -15,6 +20,7 @@ import sys
 import nibabel as nib
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from nibabel.orientations import axcodes2ornt, io_orientation, ornt_transform
 from tqdm import tqdm
@@ -35,6 +41,16 @@ def find_subjects(data_dir):
     return subjects
 
 
+def find_image(path, sid, mod):
+    """<path>/<sid>-<mod>.nii or .nii.gz, or None."""
+    return next((p for p in (os.path.join(path, f"{sid}-{mod}{e}") for e in (".nii", ".nii.gz"))
+                 if os.path.exists(p)), None)
+
+
+def imputed_path(out, cls, sid, mod, run, ext):
+    return os.path.join(out, cls, sid, mod, "imputed", f"{sid}-{mod}-run{run:02d}{ext}")
+
+
 def stage_gz(subjects, gz_dir):
     """BraSyn's loader only reads *.nii.gz; convert each modality once into gz_dir/<subject>/."""
     for _, sid, path in subjects:
@@ -43,12 +59,21 @@ def stage_gz(subjects, gz_dir):
             dst = os.path.join(gz_dir, sid, f"{sid}-{mod}.nii.gz")
             if os.path.exists(dst):
                 continue
-            src = next((p for p in (os.path.join(path, f"{sid}-{mod}{e}") for e in (".nii", ".nii.gz"))
-                        if os.path.exists(p)), None)
+            src = find_image(path, sid, mod)
             if src is None:
                 raise FileNotFoundError(f"{sid}: no {mod} image in {path}")
             nib.save(nib.load(src), dst + ".part.nii.gz")
             os.replace(dst + ".part.nii.gz", dst)
+
+
+def link_originals(subjects, out, mod):
+    """Symlink each subject's real <mod> image into <out>/<class>/<subject>/<mod>/original/."""
+    for cls, sid, path in subjects:
+        src = os.path.realpath(find_image(path, sid, mod))
+        dst = os.path.join(out, cls, sid, mod, "original", os.path.basename(src))
+        if not os.path.lexists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(src, dst)
 
 
 def to_original_space(pred, src_path):
@@ -66,8 +91,24 @@ def to_original_space(pred, src_path):
     return out
 
 
-def run_pass(data_path, flat_out, params, weights_dir, mod, save_ext):
-    """Impute `mod` for every subject folder in data_path -> flat_out/<subject>-<mod><ext>.
+def add_mc_dropout(netG, p):
+    """SIT has no dropout layers: apply element-wise dropout after every ReLU except in the output head,
+    active even in eval mode, so each forward pass samples a different sub-network."""
+    for name, m in netG.named_modules():
+        if isinstance(m, torch.nn.ReLU) and "out" not in name.split("."):
+            m.register_forward_hook(lambda _m, _in, y: F.dropout(y, p, training=True))
+
+
+def perturb(A, rel_std):
+    """Add Gaussian noise of rel_std x each channel's brain std to brain voxels of A (1,C,D,H,W),
+    which BraSyn has scaled to [0,1] with background at 0; background stays 0."""
+    brain = A > 0
+    std = torch.stack([c[b].std() for c, b in zip(A[0], brain[0])]).view(1, -1, 1, 1, 1)
+    return torch.where(brain, (A + torch.randn_like(A) * std * rel_std).clamp(0, 1), A)
+
+
+def run_pass(data_path, flat_out, params, weights_dir, mod, save_ext, n_runs, noise, dropout):
+    """Impute `mod` n_runs times for every subject folder in data_path -> flat_out/<subject>-<mod>-runNN<ext>.
     Mirrors BraSyn's generate_missing_modality.infer() but saves in the original image space."""
     from data import create_dataset
     from generate_missing_modality import OPTIONS
@@ -94,13 +135,17 @@ def run_pass(data_path, flat_out, params, weights_dir, mod, save_ext):
             model.setup(opt)
             model.parallelize()
             model.eval()
-        model.set_input(data)
-        model.test()
+            if dropout:
+                add_mc_dropout(model.netG, dropout)
         assert data["test_target_modality"][0] == mod
-        pred = model.fake_B.detach().cpu().squeeze().numpy()
         src_path = data["A_paths"][0]
         sid = os.path.basename(os.path.dirname(src_path))
-        nib.save(to_original_space(pred, src_path), os.path.join(flat_out, f"{sid}-{mod}{save_ext}"))
+        for run in range(1, n_runs + 1):
+            torch.manual_seed(run)  # seeds the input noise (CPU) and the dropout masks (GPU)
+            model.set_input({**data, "A": perturb(data["A"], noise) if noise else data["A"]})
+            model.test()
+            pred = model.fake_B.detach().cpu().squeeze().numpy()
+            nib.save(to_original_space(pred, src_path), os.path.join(flat_out, f"{sid}-{mod}-run{run:02d}{save_ext}"))
 
 
 def main():
@@ -108,6 +153,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--config", default=os.path.join(here, "config.yaml"))
     ap.add_argument("--dry-run", action="store_true", help="validate config/inputs and print the plan; write nothing")
+    ap.add_argument("--n-runs", type=int, help="imputations per subject and modality (overrides config n_runs)")
+    ap.add_argument("--noise", type=float, help="input noise, as a fraction of brain std (overrides config noise)")
+    ap.add_argument("--dropout", type=float, help="MC dropout probability (overrides config dropout)")
     args = ap.parse_args()
     cfg_dir = os.path.dirname(os.path.abspath(args.config))
     with open(args.config) as f:
@@ -120,28 +168,37 @@ def main():
     repo, weights = P(cfg["model"]["brasyn_repo"]), P(cfg["model"]["weights_dir"])
     ext = cfg.get("output_ext", ".nii")
     mods = cfg.get("modalities", ALL_MODALITIES)
+    n_runs = args.n_runs if args.n_runs is not None else cfg.get("n_runs", 1)
+    noise = args.noise if args.noise is not None else cfg.get("noise", 0.0)
+    dropout = args.dropout if args.dropout is not None else cfg.get("dropout", 0.0)
     assert ext in (".nii", ".nii.gz") and set(mods) <= set(ALL_MODALITIES), "bad output_ext/modalities in config"
+    assert n_runs >= 1 and noise >= 0 and 0 <= dropout < 1, "need n_runs >= 1, noise >= 0, 0 <= dropout < 1"
     assert os.path.exists(os.path.join(weights, "latest_net_G.pth")), f"no latest_net_G.pth in {weights}"
 
     subjects = find_subjects(data_dir)
     if cfg.get("limit"):
         subjects = subjects[: cfg["limit"]]
-    print(f"{len(subjects)} subjects, passes: {mods}\nout: {out}")
+    print(f"{len(subjects)} subjects, passes: {mods}, {n_runs} run(s) each (noise={noise}, dropout={dropout})\nout: {out}")
+
+    def todo_for(mod):  # subjects missing any of the n_runs imputations of mod
+        return [s for s in subjects
+                if not all(os.path.exists(imputed_path(out, s[0], s[1], mod, r, ext)) for r in range(1, n_runs + 1))]
 
     if args.dry_run:
-        missing = [(sid, m) for _, sid, path in subjects for m in ALL_MODALITIES
-                   if not any(os.path.exists(os.path.join(path, f"{sid}-{m}{e}")) for e in (".nii", ".nii.gz"))]
+        missing = [(sid, m) for _, sid, path in subjects for m in ALL_MODALITIES if find_image(path, sid, m) is None]
         classes = {}
         for cls, _, _ in subjects:
             classes[cls] = classes.get(cls, 0) + 1
         print(f"data_dir : {data_dir}\nweights  : {weights}\nbrasyn   : {repo}\nwork dir : {work}")
         print(f"classes  : {classes}\nmissing input images: {missing or 'none'}")
         print(f"GPU      : {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NOT AVAILABLE'}")
+        if n_runs > 1 and not noise and not dropout:
+            print("WARNING: noise and dropout are both 0, so all runs will be identical")
         for mod in mods:
-            done = sum(os.path.exists(os.path.join(out, c, s, f"{s}-{mod}{ext}")) for c, s, _ in subjects)
-            print(f"pass {mod}: use {[m for m in ALL_MODALITIES if m != mod]} -> {len(subjects) - done} to impute, {done} already done")
+            todo = len(todo_for(mod))
+            print(f"pass {mod}: use {[m for m in ALL_MODALITIES if m != mod]} -> {todo} to impute, {len(subjects) - todo} already done")
         c, s, _ = subjects[0]
-        print(f"example output: {os.path.join(out, c, s, f'{s}-{mods[0]}{ext}')}")
+        print(f"example output: {imputed_path(out, c, s, mods[0], 1, ext)}")
         return
 
     gz_dir = os.path.join(work, "gz")
@@ -155,7 +212,8 @@ def main():
         params = yaml.safe_load(f)
 
     for mod in mods:
-        todo = [s for s in subjects if not os.path.exists(os.path.join(out, s[0], s[1], f"{s[1]}-{mod}{ext}"))]
+        link_originals(subjects, out, mod)
+        todo = todo_for(mod)
         print(f"\n=== Dropping {mod}: {len(todo)} to do, {len(subjects) - len(todo)} already done ===")
         if not todo:
             continue
@@ -169,15 +227,17 @@ def main():
                     fn = f"{sid}-{m}.nii.gz"
                     os.symlink(os.path.join(gz_dir, sid, fn), os.path.join(in_dir, sid, fn))
 
-        run_pass(in_dir, flat_out, params, weights, mod, ext)
+        run_pass(in_dir, flat_out, params, weights, mod, ext, n_runs, noise, dropout)
 
         for cls, sid, _ in todo:
-            fn = f"{sid}-{mod}{ext}"
-            if not os.path.exists(os.path.join(flat_out, fn)):
-                print(f"WARNING: no output for {sid} ({mod})")
-                continue
-            os.makedirs(os.path.join(out, cls, sid), exist_ok=True)
-            shutil.move(os.path.join(flat_out, fn), os.path.join(out, cls, sid, fn))
+            for run in range(1, n_runs + 1):
+                dst = imputed_path(out, cls, sid, mod, run, ext)
+                src = os.path.join(flat_out, os.path.basename(dst))
+                if not os.path.exists(src):
+                    print(f"WARNING: no output for {sid} ({mod}, run {run})")
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.move(src, dst)
 
     shutil.rmtree(work, ignore_errors=True)
     print(f"\nDone. Results in {out}")
