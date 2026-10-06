@@ -1,130 +1,98 @@
 # TRUST-MRI evaluation pipeline
 
 Evaluation and trust analysis for a two-stage pipeline:
-1. a stochastic generative model **imputes** a missing MRI sequence (N samples per patient);
-2. a promptable segmenter (e.g. MedSAM) **segments** the tumour on each imputed volume with the same K prompts.
+1. a stochastic generative model **imputes** a missing MRI sequence (N samples per patient, 240 x 240 x 155);
+2. a promptable segmenter **segments** the tumour on each imputed volume with the same K prompts.
 
-This package implements everything after the two models: image and segmentation metrics, uncertainty maps, a
-two-way ANOVA separating imputation from prompt variability, and a local (patch-wise) confidence model with
-its evaluation. It runs end to end on synthetic data today. For real data, only the loader changes.
+This package implements everything after the two models: image and segmentation metrics, local maps, the
+spread of the N samples, a two-way ANOVA (imputation vs prompt) and a patch-wise logistic confidence model
+whose output is a confidence heatmap. It reads the files written by the preprocessing, imputation (BraSyn)
+and segmentation (MedSAM2) steps; it does not generate any image. It reuses the code of the imputation codebase
+([BraSyn_tutorial](https://github.com/WinstonHuTiger/BraSyn_tutorial)) and of the official
+[BraTS_evaluation](https://github.com/BraTS/BraTS_evaluation).
 
 ## Install and run
 
-Python 3.10–3.13: the official BraTS evaluation ([BraTS_evaluation](https://github.com/BraTS/BraTS_evaluation),
-built on [panoptica](https://github.com/BrainLesion/panoptica)) needs `numpy<2.3` and `pandas<3`, which have no
-Python 3.14 wheels.
+Python 3.10–3.13 (the official [BraTS_evaluation](https://github.com/BraTS/BraTS_evaluation), built on
+[panoptica](https://github.com/BrainLesion/panoptica), needs `numpy<2.3` and `pandas<3`).
 
 ```bash
 py -V:3.12 -m venv .venv          # Windows; elsewhere: python3.12 -m venv .venv
 .venv/Scripts/activate            # Windows; elsewhere: source .venv/bin/activate
 pip install -r requirements.txt
+git clone https://github.com/WinstonHuTiger/BraSyn_tutorial ../external/BraSyn_tutorial   # imputation codebase
 
-# synthetic cohort, default design: P = 8 patients, 240 x 240 x 155, N = 5 imputations, K = 5 prompts
-python -m trust_mri_eval.cli --synthetic
+python -m trust_mri_eval.cli --data-dir /path/to/cases                      # region WT, imputed modality inferred
+python -m trust_mri_eval.cli --data-dir /path/to/cases --set modality=t1c region=TC save_maps=false run_id=t1c
+BRASYN_REPO=/other/BraSyn_tutorial python -m trust_mri_eval.cli --data-dir /path/to/cases   # other clone
 
-# quick run on small volumes, without NIfTI maps
-python -m trust_mri_eval.cli --synthetic --shape 96 96 64 --no-maps --run-id quick
-
-# any Config field can be overridden (values parsed as JSON)
-python -m trust_mri_eval.cli --synthetic --set n_patients=10 "split=[6,2,2]" penalty=l1 "patch_size=[3,3,1]"
-
-# real data
-python -m trust_mri_eval.cli --data-dir /path/to/patients --regions ET TC WT
-
-pytest            # sanity and end-to-end tests (~10 s)
+pytest            # toy cases written to a temporary folder (~10 s)
 ```
 
-To run the steps by hand on **one patient** (load images, then each metric, with figures), open
-[manual_pipeline.ipynb](manual_pipeline.ipynb) from this folder. Set `SOURCE = "folder"` and
-`PATIENT_FOLDER` to analyse your own NIfTI files. It writes `metrics_<patient>.csv` next to itself.
+[imputation_eval.ipynb](imputation_eval.ipynb) evaluates one subject step by step with the modules of BraSyn and
+BraTS_evaluation: imputed runs vs real, spread of the runs, Dice per (run, prompt) and its ANOVA. Set `IMPUTED_DIR`
+(output of `run_imputation.py`) and `GT_DIR`.
+All parameters are in [config.py](trust_mri_eval/config.py); any field can be overridden with `--set name=value`.
 
-All parameters live in [trust_mri_eval/config.py](trust_mri_eval/config.py): design (N, K, P), synthetic
-generator, patch sizes, thresholds, tolerances, model settings, seeds and output switches. Runs are deterministic:
-each synthetic patient is generated from the seed `(seed, patient index)`.
+## Pipeline → code
 
-## Plugging in real data
+| Step | What | Code | Ground truth? |
+|---|---|---|---|
+| Loading | every volume in BraSyn space with BraSyn's code: IPL orientation, 144 x 192 x 192 crop, real image min-max rescaled (`toGrayScale`) | `data/io.py` | no |
+| Preprocessing | threshold the segmentations, ROI | `preprocessing.py` | ROI includes the reference when available |
+| Imputation, global | L1, L2 in the brain; SSIM (BraSyn `util.ssim`) and PSNR (as in BraSyn `test.py`) over the cropped volume | `pipeline.quality` | yes |
+| Imputation, local | patch maps of SSIM, L1, L2 (vs real) and variance (across the N images) | `metrics/image_local.py`, `pipeline.trust` | yes, except variance |
+| Distribution of the N images | mean variance (brain), mean pairwise SSIM and PSNR (BraSyn) | `pipeline.trust` | no |
+| Segmentation | official BraTS evaluation: DSC, NSD (global), lesion-wise F1 (`evaluate_single_exam`) | `pipeline.quality` | yes |
+| Segmentation agreement | fraction of the N x K masks calling each voxel tumour | `pipeline.trust` | no |
+| ANOVA | per voxel, variance of the N x K probabilities split into imputation / prompt / interaction | `uncertainty/anova.py` | no |
+| Confidence model | features per patch → logistic regression → P(segmentation correct) heatmap | `model/` | labels only |
 
-Only [trust_mri_eval/data/io.py](trust_mri_eval/data/io.py) knows about files. It produces a
-`PatientData` ([data/types.py](trust_mri_eval/data/types.py)), and nothing else in the code depends on how the
-data were stored. Expected layout, one folder per patient:
-
-```
-<data_dir>/<patient_id>/
-    imputed_n0.nii.gz ... imputed_n{N-1}.nii.gz     (or one 4D imputed.nii.gz, N on the last axis)
-    seg_ET_n{n}_k{k}.nii.gz                          probability maps in [0, 1], same K prompts for every n
-    brain_mask.nii.gz                                optional (else derived from the images)
-    gt_image.nii.gz                                  optional: real held-out sequence (evaluation only)
-    gt_ET.nii.gz  or  gt_mask.nii.gz                 optional: binary mask or BraTS label map
-    real_flair.nii.gz                                optional: anatomical-consistency feature
-```
-
-BraTS label maps are converted per region (2023: 1 NCR, 2 SNFH, 3 ET; legacy: label 4 = ET; TC = NCR + ET,
-WT = all). Each region in `--regions` is evaluated separately, with its own `seg_{region}_*` files, metrics and model.
-If a different layout is needed, rewrite `load_patient` so that it returns a `PatientData`.
-
-**If only one segmentation per imputed volume exists**, use K = 1: the ANOVA then reduces to the
-imputation factor.
-
-## What is computed
-
-| Step | Module | Needs ground truth? |
-|---|---|---|
-| Crop to brain, robust rescale to [0, 1] (0.5–99.5th percentile), masks, consensus, ROI | `preprocessing.py` | ROI includes the reference when available |
-| **A.** L1, L2, PSNR, SSIM (whole brain / tumour / healthy brain) per sample, mean ± std | `metrics/image_global.py` | yes |
-| **B.** Patch maps of local SSIM, L1, L2 and variance; failure map; region summaries | `metrics/image_local.py` | yes, except variance |
-| **C.** Mean/variance maps, pairwise SSIM (and its local map), pairwise PSNR; coverage, Spearman(std, error) | `metrics/distribution.py` | only coverage and Spearman |
-| **D.** Official BraTS evaluation (BraTS_evaluation + panoptica, glioma config): global and lesion-wise Dice, NSD, HD95; lesion TP/FP/FN, precision, recall, F1 | `metrics/segmentation.py` | yes |
-| Agreement, entropy, signed distance to the consensus boundary | `uncertainty/confidence_maps.py` | no |
-| Two-way crossed ANOVA per voxel (inside the ROI) and on the predicted volume | `uncertainty/anova.py` | no |
-| Patch features | `model/features.py` | **no, by construction** |
-| Patch labels (correct / incorrect) | `model/labels.py` | yes |
-| Logistic confidence model, recalibration, evaluation | `model/logistic.py` | for training/evaluation |
+Quality metrics compare **one** output with the ground truth: imputed image `eval_imputation` and its
+segmentation with prompt `eval_prompt`. Trust metrics use all N x K outputs and never the ground truth.
 
 Design choices worth knowing:
 
-- **SSIM** uses the same formula as `skimage.metrics.structural_similarity` (uniform 7³ window, sample
-  covariance), and a test checks it against skimage. It is reimplemented in float32 so that each voxel-wise map
-  is computed once and averaged in any region or patch. Pairwise SSIM reuses each sample's local statistics.
-- **Patch grids** ([patches.py](trust_mri_eval/patches.py)) are non-overlapping and aligned on one global
-  lattice. Patch values are means over brain voxels. A patch belongs to the tumour region when the majority
-  of its brain voxels are tumour. B runs at 3×3×3 (`p3`) and at the coarse 8×8×8 (`p8`).
-- **Thresholds** for the failure map and for the "fraction above threshold" summaries are the 90th percentile
-  of brain-patch values over **training patients only** (10th for SSIM, where low is bad).
-- **ANOVA**: M(n, k) = μ + a_n + b_k + c_nk, with no replication, so the residual is the interaction. It uses
-  unbiased mean-square estimators: σ²_A = (MS_A − MS_AB)/K, σ²_B = (MS_B − MS_AB)/N, σ²_AB = MS_AB.
-  Negative estimates are clipped to 0. Fractions are each component over their sum. Voxel fractions are set
-  to 0 where the total variance is ≤ 1e-4 (numerical noise far from any boundary). It runs only inside the
-  ROI, in chunks of voxels, on probabilities by default (`anova_on="masks"` for binary masks). The report's
-  "variance share" is Σ component / Σ total over the ROI.
-- **Features never see the ground truth.** `compute_features` takes no reference argument, so inference runs
-  the same code as training. Besides the listed features, `seg_abs_distance` (|signed distance|) is added,
-  because a linear model cannot learn "close to the boundary on either side" from the signed distance alone.
-  Local pairwise Dice is the pooled form Σc(c−1) / ((M−1)Σc), where c is the number of the M = N·K masks
-  that are positive at a voxel. Context features are each feature smoothed with σ = 2 and 5 voxels.
-- **Segmentation metrics** come from the official BraTS evaluation: `brats_evaluation.config_path("gli")`
-  loaded into a `panoptica.Panoptica_Evaluator`. Lesions are 26-connected components matched one-to-one on
-  Dice; lesion-wise scores average the matched lesions; an infinite HD95 becomes 373 mm, as in the BraTS
-  parser. In panoptica 2.1.7 the *global* NSD and HD95 ignore the voxel spacing (NSD tolerance 0.5 voxel);
-  the lesion-wise ones use it (1 mm on BraTS). The official numbers are kept as they are.
-- **ROI caveat.** During training and evaluation the ROI also contains the reference, so missed lesions are
-  scored. On a new patient it can only be built from the predictions (`compute_roi(masks, None, ...)`).
-- **Labels**: a voxel is correct if consensus = reference, or if it lies within 1 voxel of the reference
-  boundary. A 3D patch is correct if ≥ 90 % of its voxels are correct; a 3×3×1 patch, if ≥ 8 of 9
-  (`label_rule="auto"`).
-- **Model**: StandardScaler, then logistic regression (`class_weight="balanced"`, L2 or L1). C is chosen by
-  GroupKFold cross-validation grouped by patient. Patients are split into train / calibration / test
-  (default 5 / 1 / 2), and Platt (or isotonic) recalibration is fitted on the calibration patients. Three
-  variants are compared:
-  - **full**: all features;
-  - **agreement only**: the baseline;
-  - **no imputation**: the ablation, which drops the imputation features and their context versions.
-- **Evaluation** (test patients):
-  - AUROC for detecting incorrect patches (score = 1 − confidence);
-  - reliability diagram and ECE (10 bins);
-  - Brier score;
-  - risk–coverage curve and AURC;
-  - a QU-BraTS-style curve: Dice of the kept voxels vs the fraction filtered as the confidence threshold
-    rises, plus filtered-TP/TN ratios and the QU-BraTS score.
+- **SSIM**: the reported numbers come from BraSyn's `util.ssim` (Gaussian 11³ window, σ = 1.5, mean over the
+  whole cropped volume), on the GPU when there is one. On CPU it takes ~30 s per pair of volumes (dense 3D
+  convolutions), so N runs cost N + N(N−1)/2 calls. `util.ssim` only returns the mean, so the local SSIM maps
+  come from skimage's `structural_similarity(full=True)` with the same Gaussian window.
+- **Patches** are non-overlapping (`patch_size`, default 3 x 3 x 3) on one lattice shared by local maps,
+  features and labels. Patch values are means over brain voxels.
+- **Segmentation metrics** come from BraTS_evaluation's `evaluate_single_exam` with its `gli` config. Lesion-wise F1 is panoptica's recognition quality, TP / (TP + ½FP + ½FN), with
+  lesions = connected components matched one-to-one on Dice. In panoptica 2.1.7 the global NSD ignores the
+  voxel spacing (tolerance 0.5 voxel); the official numbers are kept as they are.
+- **ANOVA**: M(n, k) = μ + a_n + b_k + c_nk without replication (the residual is the interaction), unbiased
+  estimators σ²_A = (MS_A − MS_AB)/K, σ²_B = (MS_B − MS_AB)/N, σ²_AB = MS_AB, negatives clipped to 0. Computed
+  inside the ROI; the reported share is Σ component / Σ total over the ROI. With K = 1 only imputation remains.
+- **Features** (no ground truth, so inference runs the same code): patch variance and pairwise SSIM of the N
+  images, and the pooled pairwise Dice of the N x K masks, Σc(c−1) / ((M−1)Σc) with c the number of the
+  M = N·K masks positive at a voxel. Scored patches are those at least half inside the ROI. At inference,
+  build the ROI from the predictions only: `compute_roi(masks, None, ...)`.
+- **Labels**: a voxel is correct if the evaluated segmentation equals the reference or lies within 1 voxel of
+  the reference boundary; a patch is correct if ≥ 90 % of its voxels are.
+- **Model**: StandardScaler + logistic regression (`class_weight="balanced"`, L2 or L1), C chosen by
+  cross-validation grouped by patient. A fraction of the patients (`test_fraction`, default 0.25, at least one
+  when there are two patients or more) is held out; the report gives their AUROC for detecting incorrect patches.
+
+## Data
+
+Only [data/io.py](trust_mri_eval/data/io.py) reads files, through BraSyn's dataloader transform; it returns a `PatientData` ([data/types.py](trust_mri_eval/data/types.py)) in BraSyn space. Files are found
+**by name** anywhere under `--data-dir`, so the outputs of the three steps can sit in any sub-folders:
+
+```
+<case>-{t1c,t1n,t2f,t2w}.nii.gz          real preprocessed sequences (preprocessing/preprocess.py)
+<case>-mask.nii.gz                       brain mask
+<case>-seg.nii.gz                        BraTS label map (2023: 1 NCR, 2 SNFH, 3 ET)
+<case>-<mod>-runNN.nii[.gz]              N imputations of <mod> (imputation/run_imputation.py)
+<case>-<mod>-runNN-promptKK.nii[.gz]     segmentation of run NN with prompt KK, binary or probability
+```
+
+Only cases with imputations are evaluated, and every run needs the same K prompts. The real `<case>-<mod>`
+image and `-seg` are the ground truth (evaluation and labels only); without them only the ground-truth-free
+outputs are computed. If `run_imputation.py`'s `<mod>/original/` link to the real image is also found, it is
+used, since it is the image BraSyn is compared with. The region (`region`, default WT, as segmented by MedSAM2)
+is taken from `-seg`.
 
 ## Outputs
 
@@ -132,63 +100,20 @@ Design choices worth knowing:
 
 | File | Content |
 |---|---|
-| `metrics_per_patient.csv` | One row per patient and region; columns below. |
-| `metrics_summary.json` | Configuration, patient split, local thresholds, cohort mean/std/n of every metric. Also, per model variant: C, CV scores, AUROC, ECE, Brier, AURC, QU-BraTS AUCs; full-model coefficients; QU-BraTS curves. NaN/inf are written as `null`. |
-| `report.md` | Short human-readable summary of all of the above. |
-| `maps/<region>/<patient>/*.nii.gz` | Maps in the original volume geometry (affine of the input). |
-| `figures/<region>/<patient>.png` | Axial slice with the largest reference area: image, sample, variance, local SSIM, failure map, consensus vs reference, agreement, 3 ANOVA fractions, confidence overlay, dominant source. |
-| `figures/<region>/{reliability,roc,risk_coverage,qubrats_filtering,coefficients}.png` | Model evaluation charts (test patients). |
-
-CSV column prefixes:
-
-| Prefix | Content |
-|---|---|
-| `img_*` | Module A, `_mean` / `_std` over the N samples. |
-| `local_<p3\|p8>_<map>_<region>_*` | Module B summaries: `mean`, `p95` (or `p05` for SSIM), `frac_above_thr` / `frac_below_thr`. Also `local_*_failure_fraction`. |
-| `dist_*` | Module C. |
-| `seg_*` | Module D: `dice`, `nsd`, `hd95` (global), `lesion_dice`, `lesion_nsd`, `lesion_hd95`, `lesion_tp/fp/fn`, `lesion_precision/recall/f1`. |
-| `unc_*` | Entropy and disagreement in the ROI. |
-| `anova_*` | Variance shares in the ROI, plus the ANOVA of the predicted volume. |
-| `model_*` | Patch counts and the fraction of incorrect patches. |
-| `conf_*` | Mean confidence, fraction of patches dominated by each feature group, and the per-patient AUROC (test patients). |
-| `split` | train / calibration / test. |
-
-Maps in `maps/<region>/<patient>/`:
-
-| Map | Content |
-|---|---|
-| `imputed_mean`, `imputed_variance`, `pairwise_ssim_voxel` | Distribution of the N samples (module C). |
-| `local_{ssim,l1,l2,variance,pairwise_ssim}_{p3,p8}`, `failure_{p3,p8}` | Patch maps (module B), painted back to voxels. |
-| `consensus`, `agreement`, `entropy`, `signed_distance` | Confidence maps. |
-| `anova_var_{imputation,prompt,interaction,total}`, `anova_frac_*` | Voxel-wise ANOVA. |
-| `confidence` | P(segmentation correct) per patch; NaN outside the scored patches. |
-| `contribution_{imputation,segmentation,anatomy,context}` | Coefficient × standardised value, summed per group. |
-| `dominant_source` | Group with the largest absolute contribution (1 imputation, 2 segmentation, 3 anatomy, 4 context; 0 = not scored). |
-
-## Synthetic data
-
-[data/synthetic.py](trust_mri_eval/data/synthetic.py) generates the synthetic cohort. Each patient has:
-- an ellipsoidal brain with grey/white matter, a cortical CSF rim, two ventricles and smooth texture;
-- 1–3 ellipsoidal tumours (radius 5–25 voxels) with a bright enhancing rim.
-
-Imputations add three kinds of error to the real image:
-- smooth noise, three times stronger near tumour boundaries;
-- small elastic warps around the tumours;
-- with probability 0.3 per sample, a hallucinated bright blob.
-
-Segmentations threshold each smoothed imputation, then apply a prompt-specific boundary shift (−2…+2 voxels)
-and a smooth jitter field fixed per prompt, plus a small (n, k) interaction jitter. A prompt may also ignore a
-non-largest lesion. This makes the crossed design non-trivial. Numbers obtained on synthetic data only show
-that the pipeline works; they say nothing about real models.
+| `metrics_per_patient.csv` | one row per patient: N, K, `img_*` (imputation vs real), `seg_*` (BraTS), `dist_*` (N images), `anova_share_*`, `split` |
+| `metrics_summary.json` | configuration, split, cohort mean / std / n of every metric, model C and test AUROC |
+| `maps/<patient>/*.nii.gz` | in BraSyn space (IPL, 144 x 192 x 192, with its affine): `local_{ssim,l1,l2,variance}`, `seg_agreement`, `anova_{var,frac}_*`, `patch_label`, `confidence` (NaN where undefined) |
+| `figures/<patient>.png` | axial slice: local quality maps, agreement, ANOVA shares, confidence heatmap next to the true patch labels |
 
 ## Layout
 
 ```
 trust_mri_eval/
-  config.py  cli.py  pipeline.py  preprocessing.py  patches.py  report.py
-  data/        types.py (PatientData), synthetic.py, io.py
-  metrics/     ssim.py, image_global.py, image_local.py, distribution.py, segmentation.py
-  uncertainty/ confidence_maps.py, anova.py
+  __init__.py  imports BraSyn from BRASYN_REPO (default ../external/BraSyn_tutorial)
+  config.py  cli.py  pipeline.py  preprocessing.py  patches.py
+  data/        types.py (PatientData), io.py
+  metrics/     image_local.py (local SSIM, L1, L2 maps)
+  uncertainty/ anova.py
   model/       features.py, labels.py, logistic.py
   viz/         plots.py
 tests/

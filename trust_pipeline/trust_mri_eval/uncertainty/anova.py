@@ -28,9 +28,8 @@ def anova_two_way(values: np.ndarray, clip_negative: bool = True, min_total: flo
     """Variance decomposition of ``values`` with shape (N, K, ...) along the first two axes.
 
     Returns arrays of shape ``values.shape[2:]``:
-    ``var_imputation, var_prompt, var_interaction, var_total`` (sum of the three components),
-    ``frac_*`` (Sobol-like fractions), and the sums of squares ``ss_imputation, ss_prompt,
-    ss_interaction, ss_total`` (``ss_total`` = sum of the other three, exactly).
+    ``var_imputation, var_prompt, var_interaction, var_total`` (sum of the three components) and
+    ``frac_*`` (Sobol-like fractions).
     Fractions are 0 where ``var_total <= min_total`` (no meaningful variability to split).
     """
     y = np.asarray(values, dtype=np.float64)
@@ -43,7 +42,6 @@ def anova_two_way(values: np.ndarray, clip_negative: bool = True, min_total: flo
     ss_a = k * (row ** 2).sum(0)
     ss_b = n * (col ** 2).sum(0)
     ss_ab = (resid ** 2).sum((0, 1))
-    ss_tot = ((y - grand) ** 2).sum((0, 1))
 
     zeros = np.zeros_like(grand)
     if n > 1 and k > 1:
@@ -61,8 +59,7 @@ def anova_two_way(values: np.ndarray, clip_negative: bool = True, min_total: flo
     total = var_a + var_b + var_ab
     has_var = total > min_total
     safe = np.where(has_var, total, 1.0)
-    out = {"var_imputation": var_a, "var_prompt": var_b, "var_interaction": var_ab, "var_total": total,
-           "ss_imputation": ss_a, "ss_prompt": ss_b, "ss_interaction": ss_ab, "ss_total": ss_tot}
+    out = {"var_imputation": var_a, "var_prompt": var_b, "var_interaction": var_ab, "var_total": total}
     for name, v in zip(COMPONENTS, (var_a, var_b, var_ab)):
         out[f"frac_{name}"] = np.where(has_var, v / safe, 0.0)
     return out
@@ -88,8 +85,3 @@ def anova_maps(values: np.ndarray, mask: np.ndarray, chunk: int = 200_000, min_t
             out[key][sel] = res[key]
     return {key: v.reshape(spatial) for key, v in out.items()}
 
-
-def anova_scalar(values: np.ndarray) -> dict[str, float]:
-    """ANOVA of one scalar per (n, k), e.g. the predicted lesion volume. ``values`` is (N, K)."""
-    res = anova_two_way(np.asarray(values, dtype=np.float64)[:, :, None])
-    return {key: float(v[0]) for key, v in res.items()}

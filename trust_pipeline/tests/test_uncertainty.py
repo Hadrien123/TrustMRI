@@ -16,9 +16,3 @@ def test_anova_recovers_injected_variances():
     assert res["var_prompt"].mean() == pytest.approx(0.1 ** 2, rel=0.03)
     assert res["var_interaction"].mean() == pytest.approx(0.05 ** 2, rel=0.03)
 
-
-def test_anova_sum_identity():
-    res = anova_two_way(crossed(4, 3, 1000, 0.2, 0.1, 0.05))
-    np.testing.assert_allclose(res["ss_imputation"] + res["ss_prompt"] + res["ss_interaction"], res["ss_total"])
-    fractions = res["frac_imputation"] + res["frac_prompt"] + res["frac_interaction"]
-    np.testing.assert_allclose(fractions[res["var_total"] > 0], 1.0)

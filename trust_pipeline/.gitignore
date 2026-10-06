@@ -1,6 +1,6 @@
 # run outputs, maps, data and caches never go to git
 outputs/
-data/
+/data/
 *.nii
 *.nii.gz
 *.npy
