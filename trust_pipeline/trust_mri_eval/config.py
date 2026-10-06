@@ -73,14 +73,6 @@ class Config:
     failure_error: str = "l1"              # "l1" or "l2"
     coverage_interval: tuple[float, float] = (5.0, 95.0)
 
-    # ---------------------------------------------------------------- segmentation metrics
-    lesion_min_size: int = 10
-    lesion_gt_dilation: int = 3
-    lesion_match_rule: str = "any_overlap"  # or "iou"
-    lesion_match_iou: float = 0.1
-    nsd_tolerance_mm: float = 1.0
-    compute_hd95: bool = True
-
     # ---------------------------------------------------------------- ANOVA
     anova_on: str = "probs"                # "probs" or "masks"
     anova_chunk: int = 200_000

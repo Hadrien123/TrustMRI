@@ -16,12 +16,11 @@ _SECTIONS = [
         ("dist_pairwise_ssim_mean", "pairwise SSIM"), ("dist_pairwise_psnr_mean", "pairwise PSNR (dB)"),
         ("dist_coverage", "coverage of [5, 95] % interval"),
         ("dist_spread_error_spearman", "Spearman(local std, local error)")]),
-    ("D. Segmentation (consensus of N x K masks vs reference)", "seg_", [
+    ("D. Segmentation (consensus vs reference, official BraTS evaluation)", "seg_", [
         ("seg_dice", "Dice"), ("seg_nsd", "NSD"), ("seg_hd95", "HD95 (mm)"),
-        ("seg_lesion_dice", "lesion-wise Dice (BraTS 2023)"), ("seg_lesion_hd95", "lesion-wise HD95 (mm)"),
-        ("seg_lesion_precision", "lesion precision"), ("seg_lesion_recall", "lesion recall"),
-        ("seg_lesion_f1", "lesion F1"), ("seg_dice_per_mask_mean", "Dice of individual masks"),
-        ("seg_dice_per_mask_std", "std of Dice across masks")]),
+        ("seg_lesion_dice", "lesion-wise Dice"), ("seg_lesion_nsd", "lesion-wise NSD"),
+        ("seg_lesion_hd95", "lesion-wise HD95 (mm)"), ("seg_lesion_precision", "lesion precision"),
+        ("seg_lesion_recall", "lesion recall"), ("seg_lesion_f1", "lesion F1")]),
     ("Uncertainty and ANOVA (inside the ROI)", "anova_", [
         ("unc_mean_entropy_roi", "mean entropy (bits)"),
         ("unc_disagreement_fraction_roi", "fraction of ROI voxels where masks disagree"),
@@ -29,9 +28,7 @@ _SECTIONS = [
         ("anova_share_interaction", "variance share: interaction"),
         ("anova_volume_frac_imputation", "lesion volume: imputation fraction"),
         ("anova_volume_frac_prompt", "lesion volume: prompt fraction"),
-        ("anova_volume_frac_interaction", "lesion volume: interaction fraction"),
-        ("anova_n_lesions_frac_imputation", "lesion count: imputation fraction"),
-        ("anova_n_lesions_frac_prompt", "lesion count: prompt fraction")]),
+        ("anova_volume_frac_interaction", "lesion volume: interaction fraction")]),
 ]
 
 
