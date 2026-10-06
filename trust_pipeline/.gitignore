@@ -1,0 +1,10 @@
+# run outputs, maps, data and caches never go to git
+outputs/
+data/
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.png
+__pycache__/
+.pytest_cache/
