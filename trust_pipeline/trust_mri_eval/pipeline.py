@@ -33,8 +33,7 @@ from .metrics.distribution import interval_coverage, mean_variance_maps, pairwis
 from .metrics.image_global import image_global_metrics, mean_std
 from .metrics.image_local import LOW_IS_BAD, failure_map, flag_threshold, patch_maps, patch_regions, \
     summarize_patch_map, voxel_error_maps
-from .metrics.lesions import label_lesions
-from .metrics.segmentation import dice, segmentation_metrics
+from .metrics.segmentation import segmentation_metrics
 from .metrics.ssim import local_stats, masked_mean, ssim_map
 from .model.features import GROUPS, PatchFeatures, compute_features
 from .model.labels import patch_confusion, patch_labels
@@ -182,11 +181,8 @@ def process_patient(prep: Prepared, cfg: Config, maps_dir: Path | None) -> Patie
 
     # ---- D. segmentation ----------------------------------------------------------------
     if has_gt:
-        seg = segmentation_metrics(prep.consensus, prep.gt_mask, prep.spacing, cfg.nsd_tolerance_mm,
-                                   cfg.lesion_gt_dilation, cfg.lesion_min_size, cfg.lesion_match_rule,
-                                   cfg.lesion_match_iou, cfg.compute_hd95)
+        seg = segmentation_metrics(prep.consensus, prep.gt_mask, prep.spacing)
         row.update({f"seg_{key}": v for key, v in seg.items()})
-        row.update(mean_std({"seg_dice_per_mask": [dice(m, prep.gt_mask) for m in prep.masks.reshape(-1, *prep.shape)]}))
 
     # ---- confidence maps ------------------------------------------------------------------
     agreement = agreement_map(prep.masks)
@@ -210,16 +206,12 @@ def process_patient(prep: Prepared, cfg: Config, maps_dir: Path | None) -> Patie
         writer(f"anova_var_{comp}", anova[f"var_{comp}"])
         writer(f"anova_frac_{comp}", anova[f"frac_{comp}"])
     writer("anova_var_total", anova["var_total"])
-    voxel_mm3 = float(np.prod(prep.spacing))
-    volumes = prep.masks.sum(axis=(2, 3, 4)) * voxel_mm3
-    n_lesions = np.array([[label_lesions(prep.masks[i, j], cfg.lesion_min_size)[1] for j in range(k)]
-                          for i in range(n)], dtype=float)
-    for label, scalars in (("volume", volumes), ("n_lesions", n_lesions)):
-        res = anova_scalar(scalars)
-        row[f"anova_{label}_mean"] = float(scalars.mean())
-        row[f"anova_{label}_var_total"] = res["var_total"]
-        for comp in COMPONENTS:
-            row[f"anova_{label}_frac_{comp}"] = res[f"frac_{comp}"]
+    volumes = prep.masks.sum(axis=(2, 3, 4)) * float(np.prod(prep.spacing))   # predicted volume per (n, k)
+    res = anova_scalar(volumes)
+    row["anova_volume_mean"] = float(volumes.mean())
+    row["anova_volume_var_total"] = res["var_total"]
+    for comp in COMPONENTS:
+        row[f"anova_volume_frac_{comp}"] = res[f"frac_{comp}"]
 
     # ---- features (ground-truth free) and labels -----------------------------------------
     feats = compute_features(prep.imputed, prep.probs, brain, roi, cfg.patch_size, cfg.seg_threshold,

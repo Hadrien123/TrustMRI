@@ -6,5 +6,7 @@ data/
 *.npy
 *.npz
 *.png
+.venv/
 __pycache__/
 .pytest_cache/
+metrics_*.csv

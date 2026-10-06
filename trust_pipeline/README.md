@@ -10,7 +10,13 @@ its evaluation. It runs end to end on synthetic data today. For real data, only 
 
 ## Install and run
 
+Python 3.10–3.13: the official BraTS evaluation ([BraTS_evaluation](https://github.com/BraTS/BraTS_evaluation),
+built on [panoptica](https://github.com/BrainLesion/panoptica)) needs `numpy<2.3` and `pandas<3`, which have no
+Python 3.14 wheels.
+
 ```bash
+py -V:3.12 -m venv .venv          # Windows; elsewhere: python3.12 -m venv .venv
+.venv/Scripts/activate            # Windows; elsewhere: source .venv/bin/activate
 pip install -r requirements.txt
 
 # synthetic cohort, default design: P = 8 patients, 240 x 240 x 155, N = 5 imputations, K = 5 prompts
@@ -25,8 +31,12 @@ python -m trust_mri_eval.cli --synthetic --set n_patients=10 "split=[6,2,2]" pen
 # real data
 python -m trust_mri_eval.cli --data-dir /path/to/patients --regions ET TC WT
 
-pytest            # unit and end-to-end tests (~15 s)
+pytest            # sanity and end-to-end tests (~10 s)
 ```
+
+To run the steps by hand on **one patient** (load images, then each metric, with figures), open
+[manual_pipeline.ipynb](manual_pipeline.ipynb) from this folder. Set `SOURCE = "folder"` and
+`PATIENT_FOLDER` to analyse your own NIfTI files. It writes `metrics_<patient>.csv` next to itself.
 
 All parameters live in [trust_mri_eval/config.py](trust_mri_eval/config.py): design (N, K, P), synthetic
 generator, patch sizes, thresholds, tolerances, model settings, seeds and output switches. Runs are deterministic:
@@ -63,9 +73,9 @@ imputation factor.
 | **A.** L1, L2, PSNR, SSIM (whole brain / tumour / healthy brain) per sample, mean ± std | `metrics/image_global.py` | yes |
 | **B.** Patch maps of local SSIM, L1, L2 and variance; failure map; region summaries | `metrics/image_local.py` | yes, except variance |
 | **C.** Mean/variance maps, pairwise SSIM (and its local map), pairwise PSNR; coverage, Spearman(std, error) | `metrics/distribution.py` | only coverage and Spearman |
-| **D.** Dice, NSD, HD95, BraTS-2023 lesion-wise Dice/HD95, lesion precision/recall/F1 | `metrics/segmentation.py`, `metrics/lesions.py` | yes |
+| **D.** Official BraTS evaluation (BraTS_evaluation + panoptica, glioma config): global and lesion-wise Dice, NSD, HD95; lesion TP/FP/FN, precision, recall, F1 | `metrics/segmentation.py` | yes |
 | Agreement, entropy, signed distance to the consensus boundary | `uncertainty/confidence_maps.py` | no |
-| Two-way crossed ANOVA per voxel (inside the ROI) and on lesion volume / count | `uncertainty/anova.py` | no |
+| Two-way crossed ANOVA per voxel (inside the ROI) and on the predicted volume | `uncertainty/anova.py` | no |
 | Patch features | `model/features.py` | **no, by construction** |
 | Patch labels (correct / incorrect) | `model/labels.py` | yes |
 | Logistic confidence model, recalibration, evaluation | `model/logistic.py` | for training/evaluation |
@@ -91,6 +101,11 @@ Design choices worth knowing:
   because a linear model cannot learn "close to the boundary on either side" from the signed distance alone.
   Local pairwise Dice is the pooled form Σc(c−1) / ((M−1)Σc), where c is the number of the M = N·K masks
   that are positive at a voxel. Context features are each feature smoothed with σ = 2 and 5 voxels.
+- **Segmentation metrics** come from the official BraTS evaluation: `brats_evaluation.config_path("gli")`
+  loaded into a `panoptica.Panoptica_Evaluator`. Lesions are 26-connected components matched one-to-one on
+  Dice; lesion-wise scores average the matched lesions; an infinite HD95 becomes 373 mm, as in the BraTS
+  parser. In panoptica 2.1.7 the *global* NSD and HD95 ignore the voxel spacing (NSD tolerance 0.5 voxel);
+  the lesion-wise ones use it (1 mm on BraTS). The official numbers are kept as they are.
 - **ROI caveat.** During training and evaluation the ROI also contains the reference, so missed lesions are
   scored. On a new patient it can only be built from the predictions (`compute_roi(masks, None, ...)`).
 - **Labels**: a voxel is correct if consensus = reference, or if it lies within 1 voxel of the reference
@@ -131,9 +146,9 @@ CSV column prefixes:
 | `img_*` | Module A, `_mean` / `_std` over the N samples. |
 | `local_<p3\|p8>_<map>_<region>_*` | Module B summaries: `mean`, `p95` (or `p05` for SSIM), `frac_above_thr` / `frac_below_thr`. Also `local_*_failure_fraction`. |
 | `dist_*` | Module C. |
-| `seg_*` | Module D, plus `seg_dice_per_mask_*` (Dice of each of the N·K masks). |
+| `seg_*` | Module D: `dice`, `nsd`, `hd95` (global), `lesion_dice`, `lesion_nsd`, `lesion_hd95`, `lesion_tp/fp/fn`, `lesion_precision/recall/f1`. |
 | `unc_*` | Entropy and disagreement in the ROI. |
-| `anova_*` | Variance shares in the ROI, plus lesion volume / count ANOVA. |
+| `anova_*` | Variance shares in the ROI, plus the ANOVA of the predicted volume. |
 | `model_*` | Patch counts and the fraction of incorrect patches. |
 | `conf_*` | Mean confidence, fraction of patches dominated by each feature group, and the per-patient AUROC (test patients). |
 | `split` | train / calibration / test. |
@@ -172,7 +187,7 @@ that the pipeline works; they say nothing about real models.
 trust_mri_eval/
   config.py  cli.py  pipeline.py  preprocessing.py  patches.py  report.py
   data/        types.py (PatientData), synthetic.py, io.py
-  metrics/     ssim.py, image_global.py, image_local.py, distribution.py, segmentation.py, lesions.py
+  metrics/     ssim.py, image_global.py, image_local.py, distribution.py, segmentation.py
   uncertainty/ confidence_maps.py, anova.py
   model/       features.py, labels.py, logistic.py
   viz/         plots.py
