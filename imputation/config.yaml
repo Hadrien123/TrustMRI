@@ -1,0 +1,17 @@
+# Paths for run_imputation.py. Relative paths are resolved against this file's folder.
+
+# BraTS-style split: <data_dir>/<class folder>/<subject>/<subject>-{t1c,t1n,t2f,t2w}.nii[.gz]
+data_dir: "/home/dell/software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa_split/test"
+
+# Imputed images are written to <output_dir>/<class folder>/<subject>/<subject>-<modality><output_ext>
+output_dir: "../results/W_preprocess_imputed"
+output_ext: ".nii"            # ".nii" matches the original dataset; ".nii.gz" to compress
+
+model:
+  brasyn_repo: "/home/dell/software/BraSyn_tutorial"                                   # cloned BraSyn code
+  weights_dir: "/home/dell/software/BraSyn_tutorial/mlcube/workspace/additional_files/weights/your_weight_name"  # folder holding latest_net_G.pth
+  parameters_file: "/home/dell/software/BraSyn_tutorial/mlcube/workspace/parameters.yaml"
+
+modalities: [t1c, t1n, t2f, t2w]   # each is dropped once and imputed from the other three
+limit: null                       # set to N to only process the first N subjects (quick test)
+work_dir: "../results/_work"       # temporary staging; deleted when the run finishes
