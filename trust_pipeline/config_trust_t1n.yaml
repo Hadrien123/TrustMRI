@@ -1,0 +1,17 @@
+# run_imputation.py config for the trust pipeline: 5 imputations of t1n per subject.
+# Relative paths are resolved against this file's folder: the notebook's folder, where everything is uploaded.
+
+data_dir: "test"                       # test.zip, extracted by the notebook: test/<class>/<subject>/
+output_dir: "results/trust_t1n"
+output_ext: ".nii.gz"
+
+model:
+  brasyn_repo: "work/BraSyn_tutorial"  # cloned by the notebook
+  weights_dir: "."                     # latest_net_G.pth fine-tuned on BraTS-Africa, uploaded next to the notebook
+  parameters_file: "work/BraSyn_tutorial/mlcube/workspace/parameters.yaml"
+
+modalities: [t1n]
+n_runs: 5
+noise: 0.1
+dropout: 0
+work_dir: "work/_imputation"
