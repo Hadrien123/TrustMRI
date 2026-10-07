@@ -4,7 +4,7 @@
 Always writes <out>/split.csv. With --mode symlink|copy, also builds <out>/{train,test}/<class>/<case>.
 Usage:
     python split_brats_africa.py
-    python split_brats_africa.py --root "/path/to/BraTS-Africa" --seed 42 --mode symlink
+    python split_brats_africa.py --root "/path/to/BraTS-Africa_preprocessed" --seed 42 --mode symlink
 """
 import argparse
 import csv
@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 
 #write path to dataset
-DEFAULT_ROOT = Path.home() / "software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa"
+DEFAULT_ROOT = Path.home() / "software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa_preprocessed"
 CLASS_FOLDERS = ["51_OtherNeoplasms", "95_Glioma"]
 
 
