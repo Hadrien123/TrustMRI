@@ -1,7 +1,8 @@
-# Project for BrainHacks Montreal Fall 2026
-# Can We Trust Imputed MRI? 
-## Uncertainty-Aware Modality Imputation for Brain Tumor Segmentation
+# Can We Trust Imputed MRI?
 
+**Uncertainty-Aware Modality Imputation for Brain Tumor Segmentation**
+
+*Project for BrainHacks Montreal Fall 2026*
 
 ## 1. Fine-tuning
 
