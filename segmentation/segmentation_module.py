@@ -819,90 +819,77 @@ def perturb_box(
 
 def propagate_direction(
     predictor,
-    frames,
+    state,
     start_z,
     box,
-    native_height,
-    native_width,
     reverse
 ):
 
-    state = predictor.init_state(
-        images=frames,
-        video_height=native_height,
-        video_width=native_width,
-        offload_video_to_cpu=True,
+    # Reuse the per-volume state: clear previous prompts and
+    # tracking results, keep the loaded frames.
+    predictor.reset_state(
+        state
     )
 
-    try:
+    predictor.add_new_points_or_box(
+        inference_state=state,
+        frame_idx=int(start_z),
+        obj_id=1,
+        box=box,
+    )
 
-        predictor.add_new_points_or_box(
-            inference_state=state,
-            frame_idx=int(start_z),
-            obj_id=1,
-            box=box,
-        )
+    predictions = {}
 
-        predictions = {}
+    with torch.inference_mode():
 
-        with torch.inference_mode():
+        if (
+            DEVICE == "cuda"
+            and USE_AMP
+        ):
 
-            if (
-                DEVICE == "cuda"
-                and USE_AMP
+            autocast_context = (
+                torch.autocast(
+                    device_type="cuda",
+                    dtype=torch.bfloat16
+                )
+            )
+
+        else:
+
+            from contextlib import nullcontext
+
+            autocast_context = (
+                nullcontext()
+            )
+
+        with autocast_context:
+
+            for (
+                frame_idx,
+                obj_ids,
+                mask_logits
+            ) in predictor.propagate_in_video(
+                state,
+                start_frame_idx=int(start_z),
+                reverse=reverse,
             ):
 
-                autocast_context = (
-                    torch.autocast(
-                        device_type="cuda",
-                        dtype=torch.bfloat16
-                    )
+                logits = (
+                    mask_logits[0]
+                    .squeeze()
                 )
 
-            else:
+                mask = (
+                    logits > 0
+                ).to(
+                    dtype=torch.uint8
+                ).cpu().numpy()
 
-                from contextlib import nullcontext
+                predictions[
+                    int(frame_idx)
+                ] = mask
 
-                autocast_context = (
-                    nullcontext()
-                )
-
-            with autocast_context:
-
-                for (
-                    frame_idx,
-                    obj_ids,
-                    mask_logits
-                ) in predictor.propagate_in_video(
-                    state,
-                    start_frame_idx=int(start_z),
-                    reverse=reverse,
-                ):
-
-                    logits = (
-                        mask_logits[0]
-                        .squeeze()
-                    )
-
-                    mask = (
-                        logits > 0
-                    ).to(
-                        dtype=torch.uint8
-                    ).cpu().numpy()
-
-                    predictions[
-                        int(frame_idx)
-                    ] = mask
-
-        return predictions
-
-    finally:
-
-        del state
-
-        if DEVICE == "cuda":
-
-            torch.cuda.empty_cache()
+    return predictions
 
 
 # ============================================================
@@ -911,7 +898,7 @@ def propagate_direction(
 
 def run_one_prompt(
     predictor,
-    frames,
+    state,
     start_z,
     box,
     depth,
@@ -921,21 +908,17 @@ def run_one_prompt(
 
     forward = propagate_direction(
         predictor,
-        frames,
+        state,
         start_z,
         box,
-        native_height,
-        native_width,
         reverse=False,
     )
 
     reverse = propagate_direction(
         predictor,
-        frames,
+        state,
         start_z,
         box,
-        native_height,
-        native_width,
         reverse=True,
     )
 
@@ -1140,46 +1123,65 @@ def process_modality(
         )
     )
 
+    # One inference state per volume, reused for every
+    # prompt and both propagation directions.
+    state = predictor.init_state(
+        images=frames,
+        video_height=height,
+        video_width=width,
+        offload_video_to_cpu=True,
+    )
+
     prompt_predictions = []
 
-    for i in range(
-        N_PROMPTS
-    ):
+    try:
 
-        box = perturb_box(
-            original_box,
-            width,
-            height,
-            rng
-        )
+        for i in range(
+            N_PROMPTS
+        ):
 
-        print(
-            f"  Prompt "
-            f"{i + 1}/{N_PROMPTS}; "
-            f"box="
-            f"{np.round(box, 1).tolist()}"
-        )
-
-        prediction = (
-            run_one_prompt(
-                predictor,
-                frames,
-                prompt_z,
-                box,
-                depth,
+            box = perturb_box(
+                original_box,
+                width,
                 height,
-                width
+                rng
             )
-        )
 
-        print(
-            f"    predicted voxels: "
-            f"{int(prediction.sum())}"
-        )
+            print(
+                f"  Prompt "
+                f"{i + 1}/{N_PROMPTS}; "
+                f"box="
+                f"{np.round(box, 1).tolist()}"
+            )
 
-        prompt_predictions.append(
-            prediction
-        )
+            prediction = (
+                run_one_prompt(
+                    predictor,
+                    state,
+                    prompt_z,
+                    box,
+                    depth,
+                    height,
+                    width
+                )
+            )
+
+            print(
+                f"    predicted voxels: "
+                f"{int(prediction.sum())}"
+            )
+
+            prompt_predictions.append(
+                prediction
+            )
+
+    finally:
+
+        del state
+
+        if DEVICE == "cuda":
+
+            torch.cuda.empty_cache()
 
     _, uncertainty, consensus = (
         calculate_uncertainty(

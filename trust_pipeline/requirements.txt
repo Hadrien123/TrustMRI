@@ -8,3 +8,6 @@ matplotlib>=3.7
 panoptica>=2.1
 BraTS-evaluation
 pytest>=7.0
+torch>=2.1
+torchvision>=0.16
+statsmodels>=0.14

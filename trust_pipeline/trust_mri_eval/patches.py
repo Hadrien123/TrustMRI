@@ -116,8 +116,3 @@ def bounding_box(mask: np.ndarray, margin: int = 0) -> tuple[slice, slice, slice
     lo = np.maximum(idx.min(0) - margin, 0)
     hi = np.minimum(idx.max(0) + 1 + margin, mask.shape)
     return tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))  # type: ignore[return-value]
-
-
-def grow_box(box: tuple[slice, ...], margin: int, shape: tuple[int, ...]) -> tuple[slice, ...]:
-    """Grow a box by ``margin`` voxels on each side, clipped to ``shape``."""
-    return tuple(slice(max(s.start - margin, 0), min(s.stop + margin, d)) for s, d in zip(box, shape))

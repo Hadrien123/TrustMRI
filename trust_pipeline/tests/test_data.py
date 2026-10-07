@@ -1,31 +1,14 @@
 import numpy as np
 
-from trust_mri_eval.data.io import load_patient, save_nifti
-from trust_mri_eval.data.synthetic import generate_patient
+from conftest import make_case
+from trust_mri_eval.data.io import index_cases, load_case
 
 
-def test_synthetic_patient(small_patient, small_cfg):
-    p = small_patient
-    assert p.imputed.shape == (small_cfg.n_imputations, *small_cfg.volume_shape)
-    assert p.seg_probs.shape == (small_cfg.n_imputations, small_cfg.n_prompts, *small_cfg.volume_shape)
-    gt, brain = p.gt_mask.astype(bool), p.brain_mask.astype(bool)
-    assert p.gt_image[gt].mean() > p.gt_image[brain & ~gt].mean()          # tumour is brighter
-    consensus = p.seg_probs.mean((0, 1)) >= 0.5
-    assert 2 * (consensus & gt).sum() / (consensus.sum() + gt.sum()) > 0.5  # segmentations overlap it
-
-
-def test_synthetic_deterministic(small_cfg):
-    np.testing.assert_array_equal(generate_patient(1, small_cfg).seg_probs, generate_patient(1, small_cfg).seg_probs)
-
-
-def test_nifti_roundtrip(small_patient, tmp_path):
-    p = small_patient
-    for n in range(p.n_imputations):
-        save_nifti(p.imputed[n], tmp_path / f"imputed_n{n}.nii.gz")
-        for k in range(p.n_prompts):
-            save_nifti(p.seg_probs[n, k], tmp_path / f"seg_ET_n{n}_k{k}.nii.gz")
-    save_nifti(p.brain_mask, tmp_path / "brain_mask.nii.gz")
-    save_nifti(p.gt_mask, tmp_path / "gt_mask.nii.gz")
-    q = load_patient(tmp_path)
-    np.testing.assert_allclose(q.seg_probs, p.seg_probs)
-    np.testing.assert_array_equal(q.gt_mask, p.gt_mask)
+def test_load_case_in_brasyn_space(data_dir):
+    cases = index_cases(data_dir)
+    assert sorted(cases) == [f"case{i}" for i in range(4)]
+    p, raw = load_case("case0", cases["case0"]), make_case(0)
+    assert p.imputed.shape == (3, 40, 40, 40)                       # IPL, BraSyn crop
+    assert p.gt_mask.sum() == raw.gt_mask.sum()                      # the whole tumour is inside the crop
+    np.testing.assert_array_equal(p.seg_probs.sum((2, 3, 4)), raw.seg_probs.sum((2, 3, 4)))
+    assert p.gt_image.min() == 0 and p.gt_image.max() == 1           # toGrayScale
