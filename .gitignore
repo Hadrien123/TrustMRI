@@ -1,2 +1,6 @@
 outputs/
 __pycache__/
+external/
+plot_runs/
+results/
+data/

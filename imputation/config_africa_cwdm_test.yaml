@@ -1,0 +1,19 @@
+# Paths for run_imputation_cwdm.py. Relative paths are resolved against this file's folder.
+
+data_dir: "/home/dell/software/BraTs Africa/BraTS-Africa Dataset/BraTS-Africa_split/test"
+
+output_dir: "../results/africa_cwdm_pretrained_test"
+output_ext: ".nii"
+
+model:
+  cwdm_repo: "/home/dell/software/cwdm"
+  weights:                     # released weights, https://huggingface.co/pfriedri/cwdm
+    t1n: "/home/dell/software/cwdm/weights/t1_gen.pt"
+    t1c: "/home/dell/software/cwdm/weights/t1ce_gen.pt"
+    t2w: "/home/dell/software/cwdm/weights/t2_gen.pt"
+    t2f: "/home/dell/software/cwdm/weights/flair_gen.pt"
+
+modalities: [t1c, t1n, t2f, t2w]
+
+n_runs: 1                      # stochastic sampling; run k uses seed k (--n-runs overrides)
+limit: null                    # set to N to only process the first N subjects (quick test)
