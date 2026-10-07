@@ -1,4 +1,4 @@
-# Project for BrainHacks Montreal Fall 2026
+# Project for [Brainhack Montreal Fall 2026](https://brainhackmtl.github.io/fall2026/)
 
 **Uncertainty-Aware Modality Imputation for Brain Tumor Segmentation**
 
