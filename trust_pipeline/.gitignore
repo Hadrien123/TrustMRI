@@ -10,3 +10,4 @@ outputs/
 __pycache__/
 .pytest_cache/
 metrics_*.csv
+trust_pipeline_t1n (3).ipynb
